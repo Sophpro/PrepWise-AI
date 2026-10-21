@@ -37,6 +37,13 @@ st.set_page_config(
 )
 
 
+# --------------------------------------------------
+# Responsive styling
+# --------------------------------------------------
+# Streamlit already stacks st.columns vertically below ~640px. The CSS below
+# limits line length on large screens, enlarges touch targets and tightens
+# spacing on phones. Only static markup is injected; AI and learner text is
+# always rendered through st.markdown without unsafe HTML.
 st.markdown(
     """
 <style>
@@ -778,6 +785,7 @@ QUESTION_TYPES = [
     "Role knowledge",
     "Scenario / case",
     "Coding / DSA",
+    "System design",
 ]
 
 DIFFICULTY_LEVELS = ["Beginner", "Intermediate", "Advanced"]
@@ -996,6 +1004,7 @@ def question_type_label(question_type):
     labels = {
         "Experience / STAR": "Project",
         "Coding / DSA": "Coding",
+        "System design": "System design",
         "Role knowledge": "Role knowledge",
         "Scenario / case": "Scenario",
     }
@@ -3263,7 +3272,7 @@ be reviewed critically.
                         "Scenario",
                     ]
                     if analysis["industry_domain"] == "Software and Technology":
-                        visible_question_types.append("Coding")
+                        visible_question_types.extend(["Coding", "System design"])
 
                     question_category = st.segmented_control(
                         "Question type",
@@ -3272,8 +3281,8 @@ be reviewed critically.
                         help=(
                             "Project uses STAR; Role knowledge checks what you "
                             "understand; Scenario checks workplace judgement; "
-                            "Coding provides a code editor for software and "
-                            "technology roles."
+                            "Coding provides an algorithm editor; System design "
+                            "checks architecture decisions for software roles."
                         ),
                     ) or "Role knowledge"
 
@@ -3291,8 +3300,12 @@ be reviewed critically.
                             "explaining priorities, actions, risks and judgement."
                         ),
                         "Coding": (
-                            "Solve an original coding, SQL or data-structures task "
-                            "and explain correctness, efficiency and testing."
+                            "Implement an original algorithm or data-structures "
+                            "function with defined inputs, outputs, constraints and examples."
+                        ),
+                        "System design": (
+                            "Design a software service or architecture and explain "
+                            "components, data flow, scale, reliability and trade-offs."
                         ),
                     }
                     st.caption(
@@ -3305,9 +3318,15 @@ be reviewed critically.
                     elif question_category == "Coding":
                         question_type = "Coding / DSA"
                         st.caption(
-                            "Choose Coding when the target role or competency "
-                            "requires programming, algorithms, SQL or a similar "
-                            "code-based task."
+                            "Coding questions require an implementation. Architecture, "
+                            "APIs and distributed scaling are assessed separately under "
+                            "System design."
+                        )
+                    elif question_category == "System design":
+                        question_type = "System design"
+                        st.caption(
+                            "Choose System design for services, APIs, databases, caching, "
+                            "concurrency, distributed systems and architecture trade-offs."
                         )
                     elif question_category == "Scenario":
                         question_type = "Scenario / case"
@@ -3379,7 +3398,8 @@ be reviewed critically.
 
     st.caption(
         "Do not paste confidential information. Coding questions are original "
-        "DSA practice questions and are not claimed to come from LeetCode or any employer."
+        "algorithm and DSA exercises, not copied from LeetCode or any employer. "
+        "Architecture questions are labelled System design."
     )
     st.stop()
 
