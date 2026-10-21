@@ -37,13 +37,6 @@ st.set_page_config(
 )
 
 
-# --------------------------------------------------
-# Responsive styling
-# --------------------------------------------------
-# Streamlit already stacks st.columns vertically below ~640px. The CSS below
-# limits line length on large screens, enlarges touch targets and tightens
-# spacing on phones. Only static markup is injected; AI and learner text is
-# always rendered through st.markdown without unsafe HTML.
 st.markdown(
     """
 <style>
