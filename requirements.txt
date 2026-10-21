@@ -1,3 +1,5 @@
-streamlit>=1.50,<2
+streamlit>=1.39,<2
 google-genai>=1.0,<2
 pydantic>=2.7,<3
+reportlab>=4.2,<5
+Pillow>=10.4,<13

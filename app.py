@@ -1,8 +1,18 @@
 from datetime import datetime
-import json
+from io import BytesIO
+import re
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 import streamlit as st
 from google import genai
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from xml.sax.saxutils import escape
 
 from ai_service import (
     analyse_concept_understanding,
@@ -20,8 +30,8 @@ from ai_service import (
 
 
 st.set_page_config(
-    page_title="AI Job Interview Coach",
-    page_icon="💬",
+    page_title="PrepWise AI",
+    page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -738,6 +748,8 @@ SAMPLE_JOB_DESCRIPTION = SAMPLE_JOB_DESCRIPTIONS["Software — Junior Developer"
 
 MAX_JOB_DESCRIPTION_LENGTH = 6000
 MAX_PROJECT_CONTEXT_LENGTH = 2500
+MAX_PROFILE_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_DOCX_XML_BYTES = 2 * 1024 * 1024
 MAX_STUDENT_RESPONSE_LENGTH = 4000
 MAX_CODE_RESPONSE_LENGTH = 2600
 MAX_CODE_REASONING_LENGTH = 1000
@@ -899,7 +911,10 @@ STAGE_SHORT_NAMES = {
 DEFAULT_STATE = {
     "setup_complete": False,
     "job_description_input": "",
+    "candidate_background_input": "",
     "project_context_input": "",
+    "candidate_upload_signature": "",
+    "project_upload_signature": "",
     "job_analysis": None,
     "active_role": "",
     "active_domain": "Other",
@@ -992,6 +1007,186 @@ def question_type_label(question_type):
         "Scenario / case": "Scenario",
     }
     return labels.get(question_type, question_type)
+
+
+def extract_uploaded_summary(uploaded_file):
+    """Extract safe plain text from TXT, Markdown or modern Word files."""
+    if uploaded_file.size > MAX_PROFILE_UPLOAD_BYTES:
+        raise ValueError("The file is larger than the 5 MB upload limit.")
+
+    file_name = uploaded_file.name.lower()
+    file_bytes = uploaded_file.getvalue()
+
+    if file_name.endswith((".txt", ".md")):
+        text = file_bytes.decode("utf-8", errors="replace").strip()
+    elif file_name.endswith(".docx"):
+        try:
+            with ZipFile(BytesIO(file_bytes)) as document_archive:
+                document_info = document_archive.getinfo("word/document.xml")
+                if document_info.file_size > MAX_DOCX_XML_BYTES:
+                    raise ValueError(
+                        "The Word document contains too much text to process safely."
+                    )
+                document_xml = document_archive.read(document_info)
+        except (BadZipFile, KeyError) as error:
+            raise ValueError(
+                "This is not a readable .docx file. Open it in Word and save it "
+                "again as a Word Document (.docx)."
+            ) from error
+
+        # DOCX files are ZIP archives containing XML. Reject custom entity
+        # declarations before parsing and read only the main document text.
+        upper_xml = document_xml.upper()
+        if b"<!DOCTYPE" in upper_xml or b"<!ENTITY" in upper_xml:
+            raise ValueError("The Word document contains unsupported XML content.")
+
+        try:
+            root = ElementTree.fromstring(document_xml)
+        except ElementTree.ParseError as error:
+            raise ValueError("The Word document text could not be parsed.") from error
+
+        word_namespace = (
+            "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        )
+        paragraph_tag = f"{{{word_namespace}}}p"
+        text_tag = f"{{{word_namespace}}}t"
+        tab_tag = f"{{{word_namespace}}}tab"
+        break_tags = {
+            f"{{{word_namespace}}}br",
+            f"{{{word_namespace}}}cr",
+        }
+        paragraphs = []
+        for paragraph in root.iter(paragraph_tag):
+            parts = []
+            for element in paragraph.iter():
+                if element.tag == text_tag and element.text:
+                    parts.append(element.text)
+                elif element.tag == tab_tag:
+                    parts.append("\t")
+                elif element.tag in break_tags:
+                    parts.append("\n")
+            paragraph_text = "".join(parts).strip()
+            if paragraph_text:
+                paragraphs.append(paragraph_text)
+        text = "\n".join(paragraphs).strip()
+    else:
+        raise ValueError("Upload a .txt, .md or .docx file.")
+
+    if not text:
+        raise ValueError("No readable text was found in the uploaded file.")
+
+    return text
+
+
+def render_candidate_context_input(question_category):
+    """Render context that is proportionate to the selected question mode."""
+    is_project = question_category == "Project"
+
+    if is_project:
+        container = st.container()
+        heading = "##### Project experience to discuss (optional)"
+        description = (
+            "Describe an anonymised project, placement or work experience that "
+            "you are comfortable discussing. Include the situation, your "
+            "responsibility, actions, technical decisions and result. Leave it "
+            "blank if you prefer to choose an experience after seeing the question."
+        )
+        upload_label = "Upload an anonymised project summary"
+        text_label = "Project experience summary"
+        placeholder = (
+            "Example: In a team project, I developed a Java booking application. "
+            "I was responsible for the order workflow, wrote SQL queries, tested "
+            "edge cases and helped reduce duplicate booking errors."
+        )
+        context_state_key = "project_context_input"
+        upload_widget_key = "project_context_file"
+        upload_signature_key = "project_upload_signature"
+    else:
+        container = st.expander(
+            "Personalise using my background (optional)",
+            expanded=False,
+            icon="🧩",
+        )
+        heading = None
+        description = (
+            "Add an anonymised summary of your education, skills, tools or "
+            "experience. PrepWise AI may use it to make the selected question "
+            "more relevant. This is optional; the job description is sufficient."
+        )
+        upload_label = "Upload an anonymised background summary"
+        text_label = "Candidate background summary"
+        placeholder = (
+            "Example: I am a computing student with experience in Java, Python, "
+            "SQL, Git and software testing."
+        )
+        context_state_key = "candidate_background_input"
+        upload_widget_key = "candidate_context_file"
+        upload_signature_key = "candidate_upload_signature"
+
+    with container:
+        if heading:
+            st.markdown(heading)
+        st.caption(description)
+        st.caption(
+            "Do not include names, contact details, confidential company "
+            "information or proprietary source code."
+        )
+
+        uploaded_context = st.file_uploader(
+            upload_label,
+            type=["txt", "md", "docx"],
+            key=upload_widget_key,
+            help=(
+                "Optional: upload a TXT, Markdown or Word (.docx) summary of up "
+                "to 5 MB. Its text will be copied into the editable box below."
+            ),
+        )
+
+        if uploaded_context is None:
+            st.session_state[upload_signature_key] = ""
+        else:
+            upload_signature = f"{uploaded_context.name}:{uploaded_context.size}"
+            if upload_signature != st.session_state[upload_signature_key]:
+                try:
+                    uploaded_text = extract_uploaded_summary(uploaded_context)
+                    if len(uploaded_text) > MAX_PROJECT_CONTEXT_LENGTH:
+                        st.error(
+                            "The extracted summary is too long. Shorten it to "
+                            f"{MAX_PROJECT_CONTEXT_LENGTH:,} characters or fewer."
+                        )
+                    else:
+                        st.session_state[context_state_key] = uploaded_text
+                        st.session_state[upload_signature_key] = upload_signature
+                        st.success(
+                            "The uploaded text was extracted successfully. You "
+                            "can review and edit it below."
+                        )
+                except ValueError as error:
+                    st.error(f"Could not read the uploaded file: {error}")
+
+        candidate_context = st.text_area(
+            text_label,
+            key=context_state_key,
+            height=170 if is_project else 130,
+            placeholder=placeholder,
+            help=(
+                "Include only information that you are authorised and "
+                "comfortable to discuss in an interview."
+            ),
+        )
+
+        context_length = len(candidate_context)
+        if context_length > MAX_PROJECT_CONTEXT_LENGTH:
+            st.error(
+                "Shorten the summary to "
+                f"{MAX_PROJECT_CONTEXT_LENGTH:,} characters or fewer."
+            )
+        elif candidate_context:
+            st.caption(
+                f"{context_length:,}/{MAX_PROJECT_CONTEXT_LENGTH:,} characters ✓"
+            )
+
+    return candidate_context, context_length
 
 
 def bullet_list(items, empty_text="_None noted._"):
@@ -1182,10 +1377,10 @@ def render_app_brand():
     st.markdown(
         """
 <div class="app-brand">
-  <span class="brand-mark">AI</span>
+  <span class="brand-mark">PW</span>
   <div class="brand-copy">
-    <strong>Interview Coach</strong>
-    <span>Adaptive practice workspace</span>
+    <strong>PrepWise AI</strong>
+    <span>Adaptive AI Interview Coach</span>
   </div>
 </div>
 """,
@@ -1681,6 +1876,232 @@ def build_practice_report():
     }
 
 
+def _report_label(value):
+    """Turn internal snake-case keys into reader-friendly labels."""
+    return str(value).replace("_", " ").strip().title()
+
+
+def _clean_report_text(value):
+    """Convert AI Markdown into readable plain text for exported reports."""
+    if value is None:
+        return "Not recorded"
+    text = str(value).replace("\r\n", "\n")
+    text = re.sub(r"!\[([^]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)
+    text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", text)
+    text = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"\1", text)
+    text = text.replace("`", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip() or "Not recorded"
+
+
+def _append_structured_blocks(blocks, title, value, level=2):
+    """Flatten nested evaluation evidence into headings and readable text."""
+    if value in (None, "", [], {}):
+        return
+
+    blocks.append(("heading", level, _report_label(title)))
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if item in (None, "", [], {}):
+                continue
+            if isinstance(item, (dict, list)):
+                _append_structured_blocks(blocks, key, item, min(level + 1, 4))
+            else:
+                blocks.append(("label", _report_label(key), _clean_report_text(item)))
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                for key, child in item.items():
+                    if child not in (None, "", [], {}):
+                        blocks.append(
+                            ("label", _report_label(key), _clean_report_text(child))
+                        )
+                blocks.append(("space",))
+            else:
+                blocks.append(("bullet", _clean_report_text(item)))
+    else:
+        blocks.append(("body", _clean_report_text(value)))
+
+
+def build_report_blocks(report):
+    """Create one shared, human-readable report structure for Word and PDF."""
+    blocks = [
+        ("title", "PrepWise AI Practice Report"),
+        ("body", "Formative learning evidence from one interview-practice cycle."),
+        ("heading", 1, "Session overview"),
+        ("label", "Generated", report["generated_at"]),
+        ("label", "Target role", report["role"]),
+        ("label", "Industry", report["industry_domain"]),
+        ("label", "Competency", report["competency"]),
+        ("label", "Competency family", report["competency_family"]),
+        ("label", "Question type", report["question_type"]),
+        ("label", "Difficulty", report["difficulty"]),
+        ("heading", 1, "Interview question"),
+        ("body", _clean_report_text(report["question"])),
+        ("heading", 1, "Initial response"),
+        ("body", _clean_report_text(report["initial_response"])),
+    ]
+
+    _append_structured_blocks(
+        blocks,
+        "Initial coaching evaluation",
+        report["learning_evidence"].get("initial_evaluation"),
+        1,
+    )
+
+    if report["depth_questions"]:
+        blocks.append(("heading", 1, "Adaptive follow-up conversation"))
+        for index, question in enumerate(report["depth_questions"], start=1):
+            blocks.append(("heading", 2, f"Follow-up question {index}"))
+            blocks.append(("body", _clean_report_text(question)))
+            response = (
+                report["depth_responses"][index - 1]
+                if index <= len(report["depth_responses"])
+                else "Not answered"
+            )
+            blocks.append(("label", "Learner response", _clean_report_text(response)))
+
+    blocks.extend(
+        [
+            ("heading", 1, "Reflection before final rewrite"),
+            ("body", _clean_report_text(report["reflection_before_rewrite"])),
+            ("heading", 1, "Final rewritten response"),
+            ("body", _clean_report_text(report["final_rewrite"])),
+        ]
+    )
+
+    _append_structured_blocks(
+        blocks,
+        "Final rewrite evaluation",
+        report["learning_evidence"].get("final_rewrite_evaluation"),
+        1,
+    )
+    _append_structured_blocks(
+        blocks,
+        "Final concept analysis",
+        report["learning_evidence"].get("final_analysis"),
+        1,
+    )
+    _append_structured_blocks(
+        blocks,
+        "Understanding checkpoint",
+        report["learning_evidence"].get("understanding_checkpoint"),
+        1,
+    )
+    _append_structured_blocks(
+        blocks,
+        "Hints used",
+        report["learning_evidence"].get("hints_used"),
+        1,
+    )
+    blocks.extend(
+        [
+            ("heading", 1, "Important notice"),
+            ("body", report["notice"]),
+        ]
+    )
+    return blocks
+
+
+def create_pdf_report(report):
+    """Return the completed practice report as an in-memory PDF file."""
+    output = BytesIO()
+    document = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=17 * mm,
+        bottomMargin=17 * mm,
+        title="PrepWise AI Practice Report",
+        author="PrepWise AI",
+    )
+    styles = getSampleStyleSheet()
+    styles.add(
+        ParagraphStyle(
+            name="PrepTitle",
+            parent=styles["Title"],
+            fontName="Helvetica-Bold",
+            fontSize=20,
+            leading=24,
+            textColor=colors.HexColor("#4F46E5"),
+            alignment=TA_CENTER,
+            spaceAfter=12,
+        )
+    )
+    for level, size, colour in (
+        (1, 15, "#20243A"),
+        (2, 12, "#343A5E"),
+        (3, 10.5, "#4F46E5"),
+        (4, 10, "#4F46E5"),
+    ):
+        styles.add(
+            ParagraphStyle(
+                name=f"PrepHeading{level}",
+                parent=styles["Heading2"],
+                fontName="Helvetica-Bold",
+                fontSize=size,
+                leading=size + 3,
+                textColor=colors.HexColor(colour),
+                spaceBefore=10,
+                spaceAfter=5,
+            )
+        )
+    body_style = ParagraphStyle(
+        name="PrepBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=9.5,
+        leading=13.5,
+        textColor=colors.HexColor("#2A2E42"),
+        spaceAfter=6,
+    )
+    bullet_style = ParagraphStyle(
+        name="PrepBullet",
+        parent=body_style,
+        leftIndent=12,
+        firstLineIndent=-7,
+        bulletIndent=3,
+    )
+
+    story = []
+    for kind, *content in build_report_blocks(report):
+        if kind == "title":
+            story.append(Paragraph(escape(content[0]), styles["PrepTitle"]))
+        elif kind == "heading":
+            level, text = content
+            story.append(Paragraph(escape(text), styles[f"PrepHeading{min(level, 4)}"]))
+        elif kind == "label":
+            label, text = content
+            safe_text = escape(text).replace("\n", "<br/>")
+            story.append(
+                Paragraph(f"<b>{escape(label)}:</b> {safe_text}", body_style)
+            )
+        elif kind == "bullet":
+            story.append(Paragraph(escape(content[0]), bullet_style, bulletText="•"))
+        elif kind == "body":
+            for paragraph_text in content[0].split("\n\n"):
+                story.append(
+                    Paragraph(escape(paragraph_text).replace("\n", "<br/>"), body_style)
+                )
+        elif kind == "space":
+            story.append(Spacer(1, 4))
+
+    def add_page_number(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#74788F"))
+        canvas.drawCentredString(A4[0] / 2, 9 * mm, f"Page {doc.page}")
+        canvas.restoreState()
+
+    document.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
+    return output.getvalue()
+
+
 # --------------------------------------------------
 # Chat message renderers
 # --------------------------------------------------
@@ -1700,7 +2121,7 @@ def render_question(data):
         introduction = "Here is a follow-up question based on your response:"
     elif data.get("show_welcome", True):
         introduction = (
-            "Hello! I am your AI Job Interview Coach. 👋 Here is your question."
+            "Hello! I am your PrepWise AI Interview Coach. 👋 Here is your question."
         )
     else:
         introduction = "Let’s continue with the next question in your pathway:"
@@ -2581,7 +3002,11 @@ def continue_topic_pathway():
             job_description=(
                 st.session_state.job_description_input or SAMPLE_JOB_DESCRIPTION
             ),
-            project_context=st.session_state.project_context_input,
+            project_context=(
+                st.session_state.project_context_input
+                if st.session_state.active_question_type == "Experience / STAR"
+                else st.session_state.candidate_background_input
+            ),
         )
         progress.progress(100, text="Next interview question ready.")
     except Exception as error:
@@ -2615,7 +3040,8 @@ if not st.session_state.setup_complete:
         render_app_brand()
         st.markdown('<div class="side-label">Workspace</div>', unsafe_allow_html=True)
         st.info(
-            "Set up one targeted interview using an anonymised job description.",
+            "Set up one targeted interview using an anonymised job description "
+            "and optional candidate background.",
             icon="✨",
         )
         st.markdown('<div class="side-label">Learning design</div>', unsafe_allow_html=True)
@@ -2626,8 +3052,8 @@ if not st.session_state.setup_complete:
         st.caption("Your progress is stored only for this browser session.")
 
     render_hero(
-        "AI Job Interview Coach",
-        "Prepare for role-specific interviews across technology, finance, healthcare and other fields.",
+        "PrepWise AI",
+        "An adaptive AI interview coach for role-specific practice across technology, finance, healthcare and other fields.",
         chips=("🧠 Question Generator AI", "💭 Socratic Evaluator AI", "🚫 No hiring scores"),
     )
 
@@ -2645,12 +3071,12 @@ if not st.session_state.setup_complete:
                 """
 1. Read and acknowledge the AI use and privacy notice.
 2. Paste an anonymised job description from your target field.
-3. Choose a competency, question type and difficulty.
-4. Give a first response without copying an AI-generated answer.
-5. Respond to up to two adaptive follow-up questions based on your own explanation.
-6. Reflect on the most important improvement and rewrite one complete answer.
-7. Review the comparison, final concept analysis and suggested next steps.
-8. Continue with a new full cycle for the next concept in the topic pathway.
+3. Optionally add an anonymised background and project summary so questions can connect to your experience.
+4. Choose a competency, question type and difficulty.
+5. Give a first response without copying an AI-generated answer.
+6. Respond to up to two adaptive follow-up questions based on your own explanation.
+7. Reflect on the most important improvement and rewrite one complete answer.
+8. Review the final analysis and continue with the next concept.
 
 The purpose is to practise independent reasoning and communication—not to
 memorise a model response.
@@ -2733,9 +3159,10 @@ This includes names, contact details, identification numbers, passwords,
 confidential company information, unpublished source code, proprietary project
 details, or information that you are not authorised to share.
 
-Job descriptions and interview responses may be sent to the Gemini API for
-question generation and feedback. AI-generated feedback may contain errors or
-inaccuracies and should be reviewed critically.
+Job descriptions, optional candidate background or project summaries, and
+interview responses may be sent to the Gemini API for question generation and
+feedback. AI-generated feedback may contain errors or inaccuracies and should
+be reviewed critically.
                     """
                 )
 
@@ -2857,6 +3284,29 @@ inaccuracies and should be reviewed critically.
                         ),
                     ) or "Role knowledge"
 
+                    question_type_descriptions = {
+                        "Project": (
+                            "Discuss a real experience using STAR: Situation, "
+                            "Task, Action and Result, including your own contribution."
+                        ),
+                        "Role knowledge": (
+                            "Explain role-relevant knowledge accurately and show "
+                            "how you would apply it."
+                        ),
+                        "Scenario": (
+                            "Respond to a hypothetical workplace situation by "
+                            "explaining priorities, actions, risks and judgement."
+                        ),
+                        "Coding": (
+                            "Solve an original coding, SQL or data-structures task "
+                            "and explain correctness, efficiency and testing."
+                        ),
+                    }
+                    st.caption(
+                        f"**{question_category}:** "
+                        f"{question_type_descriptions[question_category]}"
+                    )
+
                     if question_category == "Project":
                         question_type = "Experience / STAR"
                     elif question_category == "Coding":
@@ -2879,22 +3329,9 @@ inaccuracies and should be reviewed critically.
                         help=f"Suggested for this role: {suggested}",
                     ) or suggested
 
-                    project_context = ""
-                    if question_category == "Project":
-                        project_context = st.text_area(
-                            "Optional experience summary",
-                            key="project_context_input",
-                            height=140,
-                            placeholder=(
-                                "Describe one relevant experience, your role, actions and outcome. "
-                                "Do not include confidential information."
-                            ),
-                        )
-                        if len(project_context) > MAX_PROJECT_CONTEXT_LENGTH:
-                            st.error(
-                                f"Shorten the project summary to "
-                                f"{MAX_PROJECT_CONTEXT_LENGTH:,} characters or fewer."
-                            )
+                    candidate_context, candidate_context_length = (
+                        render_candidate_context_input(question_category)
+                    )
 
                     if st.button(
                         "Generate interview question",
@@ -2902,7 +3339,7 @@ inaccuracies and should be reviewed critically.
                         use_container_width=True,
                         disabled=(
                             not st.session_state.privacy_consent
-                            or len(project_context) > MAX_PROJECT_CONTEXT_LENGTH
+                            or candidate_context_length > MAX_PROJECT_CONTEXT_LENGTH
                         ),
                     ):
                         progress = st.progress(
@@ -2922,7 +3359,7 @@ inaccuracies and should be reviewed critically.
                                 competency=selected_skill["skill"],
                                 competency_evidence=selected_skill["evidence"],
                                 job_description=job_description,
-                                project_context=project_context,
+                                project_context=candidate_context,
                             )
                             progress.progress(100, text="Interview question ready.")
                         except Exception as error:
@@ -3331,21 +3768,22 @@ if st.session_state.stage == "completed":
     with st.container(border=True):
         st.markdown("#### 🎓 Your learning evidence")
         report = build_practice_report()
+        pdf_report = create_pdf_report(report)
         next_concept_index = next_topic_concept_index()
         can_continue_pathway = (
             next_concept_index is not None and not st.session_state.plan_b_mode
         )
         if can_continue_pathway:
-            download_col, continue_col, restart_col = st.columns(3)
+            pdf_col, continue_col, restart_col = st.columns(3)
         else:
-            download_col, restart_col = st.columns(2)
-        download_col.download_button(
-            "Download practice report",
-            data=json.dumps(report, indent=2, ensure_ascii=False),
-            file_name="interview_practice_report.json",
-            mime="application/json",
+            pdf_col, restart_col = st.columns(2)
+        pdf_col.download_button(
+            "Download PDF report",
+            data=pdf_report,
+            file_name="PrepWise_AI_practice_report.pdf",
+            mime="application/pdf",
             use_container_width=True,
-            icon="⬇️",
+            icon="📕",
         )
         if can_continue_pathway:
             next_concept = st.session_state.topic_plan[next_concept_index]["concept"]
