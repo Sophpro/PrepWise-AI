@@ -425,6 +425,44 @@ button[kind="primary"],
 [data-testid="stSidebar"] .stWidgetLabel {
     color: #475569;
 }
+
+/* Keep every Markdown list readable on the light interface. This covers
+   ordinary lists, numbered lists, nested paragraphs, generated hint key
+   points, chat-message lists and lists rendered inside the sidebar. */
+[data-testid="stAppViewContainer"] .stMarkdown ul,
+[data-testid="stAppViewContainer"] .stMarkdown ol,
+[data-testid="stAppViewContainer"] .stMarkdown li,
+[data-testid="stAppViewContainer"] .stMarkdown li p,
+[data-testid="stAppViewContainer"] [data-testid="stMarkdownContainer"] ul,
+[data-testid="stAppViewContainer"] [data-testid="stMarkdownContainer"] ol,
+[data-testid="stAppViewContainer"] [data-testid="stMarkdownContainer"] li,
+[data-testid="stAppViewContainer"] [data-testid="stMarkdownContainer"] li p,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] ul,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] ol,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] li,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] li p,
+[data-testid="stSidebar"] .stMarkdown ul,
+[data-testid="stSidebar"] .stMarkdown ol,
+[data-testid="stSidebar"] .stMarkdown li,
+[data-testid="stSidebar"] .stMarkdown li p,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] ul,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] ol,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li p {
+    color: #475569 !important;
+    -webkit-text-fill-color: #475569 !important;
+}
+
+/* Purple bullets and number markers maintain contrast against the light
+   background while the list content remains dark. */
+[data-testid="stAppViewContainer"] .stMarkdown li::marker,
+[data-testid="stAppViewContainer"] [data-testid="stMarkdownContainer"] li::marker,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] li::marker,
+[data-testid="stSidebar"] .stMarkdown li::marker,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li::marker {
+    color: #7c3aed !important;
+    -webkit-text-fill-color: #7c3aed !important;
+}
 /* Restore intentionally light text inside the purple hero. */
 [data-testid="stAppViewContainer"] .stMarkdown .hero,
 [data-testid="stAppViewContainer"] .stMarkdown .hero h1,
